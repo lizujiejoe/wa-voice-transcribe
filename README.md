@@ -1,5 +1,7 @@
 # WA Voice Transcribe
 
+This fork adds on-demand text translation for a custom Cloudflare Worker. See [translation setup](docs/CLOUDFLARE_TRANSLATION.md).
+
 A Chrome MV3 extension that adds a **Transcribe** link to every voice message on
 WhatsApp Web. The transcript appears inside the same bubble, styled to match
 WhatsApp's own transcript UI.

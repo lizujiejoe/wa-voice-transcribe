@@ -77,6 +77,7 @@ function showProvider(id) {
   }
 
   $('baseUrlRow').hidden = id !== 'custom';
+  $('translationRow').hidden = id !== 'custom';
   $('baseUrl').value = entry.baseUrl || '';
 
   $('model').hidden = isCustom;
@@ -176,6 +177,7 @@ async function load() {
   $('provider').value = settings.engine;
 
   $('language').value = settings.language || '';
+  $('targetLanguage').value = settings.targetLanguage || 'zh';
   $('ttlDays').value = String(settings.ttlDays || 0);
 
   showProvider(settings.engine);
@@ -217,6 +219,7 @@ $('save').addEventListener('click', async () => {
   }
 
   settings.language = $('language').value.trim();
+  settings.targetLanguage = $('targetLanguage').value;
   settings.ttlDays = Number($('ttlDays').value) || 0;
 
   try {

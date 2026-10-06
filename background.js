@@ -21,6 +21,7 @@ function t(key, subs) {
 const CACHE_PREFIX = 't:';
 const DAY_MS = 86400000;
 const SWEEP_ALARM = 'wa-vt-sweep';
+const MAX_TRANSLATION_CHARS = 8000;
 
 // -----------------------------------------------------------------------------
 // Pluggable interface
@@ -100,6 +101,38 @@ export class OpenAICompatibleEngine extends TranscriptionEngine {
     if (!text) throw new Error(t('errEmptyTranscription'));
     return text;
   }
+
+  async translate(text, targetLanguage) {
+    if (this.config.id !== 'custom') throw new Error(t('errTranslationProvider'));
+    if (!text || text.length > MAX_TRANSLATION_CHARS) throw new Error(t('errTranslationTooLong'));
+
+    const apiKey = (this.config.apiKey || '').trim();
+    if (!apiKey) throw keyError(t('errNoApiKey'));
+
+    const baseUrl = (this.config.baseUrl || '').replace(/\/+$/, '');
+    if (!baseUrl) throw new Error(t('errNoBaseUrl'));
+
+    let res;
+    try {
+      res = await fetch(baseUrl + '/text/translations', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + apiKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ text, target_language: targetLanguage })
+      });
+    } catch (_) {
+      throw new Error(t('errNetwork'));
+    }
+
+    if (!res.ok) throw await httpError(res);
+    let data;
+    try { data = await res.json(); } catch (_) { throw new Error(t('errBadResponse')); }
+    const translated = (data && typeof data.text === 'string') ? data.text.trim() : '';
+    if (!translated) throw new Error(t('errEmptyTranslation'));
+    return translated;
+  }
 }
 
 // Every preset speaks the same protocol today. The registry stays because it is
@@ -149,7 +182,8 @@ export async function httpError(res) {
   let detail = '';
   try {
     const body = await res.json();
-    detail = (body && body.error && body.error.message) ? body.error.message : '';
+    detail = typeof body?.error === 'string' ? body.error
+      : (body && body.error && body.error.message) ? body.error.message : '';
   } catch (_) { /* body was not JSON */ }
 
   if (res.status === 401 || res.status === 403) {
@@ -268,6 +302,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     })();
     return true; // keep the response channel open: the call is asynchronous
+  }
+
+  if (msg.type === 'TRANSLATE') {
+    (async () => {
+      try {
+        const settings = await readSettings();
+        if (settings.engine !== 'custom') throw new Error(t('errTranslationProvider'));
+        const engine = new OpenAICompatibleEngine(engineConfig(settings));
+        const text = await engine.translate(msg.text, settings.targetLanguage);
+        sendResponse({ ok: true, text, targetLanguage: settings.targetLanguage });
+      } catch (err) {
+        sendResponse({
+          ok: false,
+          error: (err && err.message) ? err.message : t('errBadResponse'),
+          needsKey: !!(err && err.needsKey)
+        });
+      }
+    })();
+    return true;
   }
 
   return undefined;

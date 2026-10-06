@@ -54,6 +54,8 @@
   var BRIDGE_TIMEOUT_MS = 10000; // how long we wait for inject.js to answer
   var RETARGET_MS = 2000;        // watchdog that re-attaches the observer to #main
   var MIN_BUBBLE_WIDTH = 120;    // narrower than this is a control, not a bubble
+  var translationEnabled = false;
+  var targetLanguage = 'zh';
 
   // ---------------------------------------------------------------------------
   // Utilities
@@ -198,12 +200,34 @@
 
   loadTtl();
   try {
+    chrome.storage.local.get({ engine: 'groq', targetLanguage: 'zh' })
+      .then(function (cfg) {
+        translationEnabled = cfg.engine === 'custom';
+        targetLanguage = cfg.targetLanguage || 'zh';
+        refreshTranslationControls();
+      })
+      .catch(function () {});
+  } catch (_) { /* context invalidated */ }
+
+  try {
     chrome.storage.onChanged.addListener(function (changes, area) {
       if (area === 'local' && changes.ttlDays) {
         ttlMs = (Number(changes.ttlDays.newValue) || 0) * DAY_MS;
       }
+      if (area === 'local' && (changes.engine || changes.targetLanguage)) {
+        if (changes.engine) translationEnabled = changes.engine.newValue === 'custom';
+        if (changes.targetLanguage) targetLanguage = changes.targetLanguage.newValue || 'zh';
+        refreshTranslationControls();
+      }
     });
   } catch (_) { /* ignore */ }
+
+  function refreshTranslationControls() {
+    var wraps = document.querySelectorAll('.wa-vt-wrap');
+    for (var i = 0; i < wraps.length; i++) {
+      if (wraps[i]._waVtUi) updateTranslationUi(wraps[i]._waVtUi);
+    }
+  }
 
   // Note: after an extension reload the content script's context is invalidated
   // and `chrome.storage` can throw SYNCHRONOUSLY, i.e. before a .catch() is even
@@ -220,8 +244,9 @@
           // Entries written before expiry existed: a bare string, no timestamp.
           // Stamp them now rather than throw them away.
           if (typeof entry === 'string') {
-            cacheSet(msgId, entry);
-            return entry;
+            var stamped = { text: entry, at: Date.now() };
+            cacheSet(msgId, stamped);
+            return stamped;
           }
           if (typeof entry.text !== 'string') return null;
 
@@ -229,7 +254,7 @@
             try { chrome.storage.local.remove(key).catch(function () {}); } catch (_) {}
             return null;
           }
-          return entry.text;
+          return entry;
         })
         .catch(function () { return null; });
     } catch (_) {
@@ -237,9 +262,14 @@
     }
   }
 
-  function cacheSet(msgId, text) {
+  function cacheSet(msgId, entry) {
     var payload = {};
-    payload[CACHE_PREFIX + msgId] = { text: text, at: Date.now() };
+    payload[CACHE_PREFIX + msgId] = {
+      text: entry.text,
+      at: entry.at || Date.now(),
+      translation: entry.translation || '',
+      targetLanguage: entry.targetLanguage || ''
+    };
     try {
       return chrome.storage.local.set(payload).catch(function () { /* non blocking */ });
     } catch (_) {
@@ -374,12 +404,21 @@
     ui.status.hidden = !(loading || error);
     ui.spinner.hidden = !loading;
     ui.text.hidden = !done;
+    ui.translationText.hidden = !done || !ui.translation || ui.translationLanguage !== targetLanguage;
     ui.foot.hidden = !done;
     ui.status.classList.toggle('wa-vt-err', error);
 
     if (idle) ui.main.textContent = t('actionTranscribe');
     else if (collapsed) ui.main.textContent = t('actionShow');
     else if (error) ui.main.textContent = t('actionRetry');
+    updateTranslationUi(ui);
+  }
+
+  function updateTranslationUi(ui) {
+    ui.translate.hidden = ui.state !== 'done' || !translationEnabled || ui.translating;
+    ui.translationText.hidden = ui.state !== 'done' || !ui.translation || ui.translationLanguage !== targetLanguage;
+    ui.copyTranslation.hidden = ui.translationText.hidden;
+    ui.translate.textContent = ui.translationText.hidden ? t('actionTranslate') : t('actionTranslateAgain');
   }
 
   function renderLoading(ui) {
@@ -387,11 +426,17 @@
     setState(ui, 'loading');
   }
 
-  function renderText(ui, text, scroll) {
-    ui.value = text;
+  function renderText(ui, entry, scroll) {
+    ui.value = entry.text;
+    ui.at = entry.at || Date.now();
+    ui.translation = entry.translation || '';
+    ui.translationLanguage = entry.targetLanguage || '';
     // Typographic quotes around the text, the way WhatsApp does it.
-    ui.text.textContent = '“' + text + '”';
+    ui.text.textContent = '“' + entry.text + '”';
+    ui.translationText.textContent = t('labelTranslation') + ' “' + ui.translation + '”';
+    ui.translationStatus.hidden = true;
     ui.copy.textContent = t('actionCopy');
+    ui.copyTranslation.textContent = t('actionCopyTranslation');
     setState(ui, 'done');
     if (scroll) bringIntoView(ui.text);
   }
@@ -415,6 +460,43 @@
     }
 
     setState(ui, 'error');
+  }
+
+  function onTranslateClick(msgId, ui) {
+    if (ui.translating || !ui.value) return;
+    ui.translating = true;
+    ui.translationStatus.textContent = t('statusTranslating');
+    ui.translationStatus.hidden = false;
+    ui.translationStatus.classList.remove('wa-vt-err');
+    updateTranslationUi(ui);
+
+    Promise.resolve().then(function () {
+      return chrome.runtime.sendMessage({ type: 'TRANSLATE', text: ui.value });
+    })
+      .then(function (res) {
+        if (!res) throw new Error(t('errNoExtensionResponse'));
+        if (!res.ok) throw new Error(res.error || t('errBadResponse'));
+        ui.translation = res.text;
+        ui.translationLanguage = res.targetLanguage;
+        ui.translationText.textContent = t('labelTranslation') + ' “' + res.text + '”';
+        ui.translationStatus.hidden = true;
+        cacheSet(msgId, {
+          text: ui.value,
+          at: ui.at,
+          translation: res.text,
+          targetLanguage: res.targetLanguage
+        });
+        updateTranslationUi(ui);
+        bringIntoView(ui.translationText);
+      })
+      .catch(function (err) {
+        ui.translationStatus.textContent = err && err.message ? err.message : String(err);
+        ui.translationStatus.classList.add('wa-vt-err');
+      })
+      .then(function () {
+        ui.translating = false;
+        updateTranslationUi(ui);
+      });
   }
 
   /**
@@ -441,10 +523,10 @@
     }
   }
 
-  function flashCopy(copy, message) {
+  function flashCopy(copy, message, resetLabel) {
     copy.textContent = message;
     clearTimeout(copy._waVtTimer);
-    copy._waVtTimer = setTimeout(function () { copy.textContent = t('actionCopy'); }, 1600);
+    copy._waVtTimer = setTimeout(function () { copy.textContent = resetLabel; }, 1600);
   }
 
   /**
@@ -491,7 +573,15 @@
     if (ui.busy) return;
 
     // Panel collapsed but the text is already in memory: reopen immediately.
-    if (ui.value && ui.state === 'collapsed') { renderText(ui, ui.value, true); return; }
+    if (ui.value && ui.state === 'collapsed') {
+      renderText(ui, {
+        text: ui.value,
+        at: ui.at,
+        translation: ui.translation,
+        targetLanguage: ui.translationLanguage
+      }, true);
+      return;
+    }
 
     ui.busy = true;
     renderLoading(ui);
@@ -516,8 +606,9 @@
           .then(function (res) {
             if (!res) throw new Error(t('errNoExtensionResponse'));
             if (!res.ok) { renderError(ui, res.error, !!res.needsKey); return null; }
-            renderText(ui, res.text, true);
-            return cacheSet(msgId, res.text);
+            var entry = { text: res.text, at: Date.now() };
+            renderText(ui, entry, true);
+            return cacheSet(msgId, entry);
           });
       })
       .catch(function (err) {
@@ -553,6 +644,11 @@
     var text = document.createElement('div');
     text.className = 'wa-vt-text';
 
+    var translationText = document.createElement('div');
+    translationText.className = 'wa-vt-text wa-vt-translation';
+    var translationStatus = document.createElement('div');
+    translationStatus.className = 'wa-vt-status wa-vt-translation-status';
+
     var foot = document.createElement('div');
     foot.className = 'wa-vt-foot';
     var copy = document.createElement('button');
@@ -566,13 +662,25 @@
     hide.type = 'button';
     hide.className = 'wa-vt-action wa-vt-hide';
     hide.textContent = t('actionHide');
+    var translate = document.createElement('button');
+    translate.type = 'button';
+    translate.className = 'wa-vt-action wa-vt-translate';
+    translate.textContent = t('actionTranslate');
+    var copyTranslation = document.createElement('button');
+    copyTranslation.type = 'button';
+    copyTranslation.className = 'wa-vt-action wa-vt-copy-translation';
+    copyTranslation.textContent = t('actionCopyTranslation');
     foot.appendChild(copy);
     foot.appendChild(sep);
+    foot.appendChild(translate);
+    foot.appendChild(copyTranslation);
     foot.appendChild(hide);
 
     wrap.appendChild(main);
     wrap.appendChild(status);
     wrap.appendChild(text);
+    wrap.appendChild(translationText);
+    wrap.appendChild(translationStatus);
     wrap.appendChild(foot);
     bubble.appendChild(wrap);
 
@@ -580,10 +688,14 @@
     // error state `status` contains something else entirely.
     var ui = {
       main: main, status: status, spinner: spinner, statusText: statusText,
-      text: text, foot: foot, copy: copy, hide: hide,
-      value: '', state: 'idle', busy: false
+      text: text, translationText: translationText, translationStatus: translationStatus,
+      foot: foot, copy: copy, copyTranslation: copyTranslation, translate: translate, hide: hide,
+      value: '', translation: '', translationLanguage: '', state: 'idle', busy: false,
+      translating: false
     };
+    wrap._waVtUi = ui;
     setState(ui, 'idle');
+    translationStatus.hidden = true;
 
     main.addEventListener('click', function (e) {
       e.preventDefault();
@@ -596,8 +708,23 @@
       e.stopPropagation();
       if (!ui.value) return;
       copyToClipboard(ui.value)
-        .then(function () { flashCopy(copy, t('actionCopied')); })
-        .catch(function () { flashCopy(copy, t('actionCopyFailed')); });
+        .then(function () { flashCopy(copy, t('actionCopied'), t('actionCopy')); })
+        .catch(function () { flashCopy(copy, t('actionCopyFailed'), t('actionCopy')); });
+    });
+
+    translate.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      onTranslateClick(msgId, ui);
+    });
+
+    copyTranslation.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (ui.translationText.hidden) return;
+      copyToClipboard(ui.translation)
+        .then(function () { flashCopy(copyTranslation, t('actionCopied'), t('actionCopyTranslation')); })
+        .catch(function () { flashCopy(copyTranslation, t('actionCopyFailed'), t('actionCopyTranslation')); });
     });
 
     hide.addEventListener('click', function (e) {

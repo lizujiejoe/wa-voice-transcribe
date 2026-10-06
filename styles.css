@@ -111,12 +111,22 @@
   user-select: text;
 }
 
+.wa-vt-translation {
+  padding-top: 6px;
+  border-top: 1px solid var(--WDS-systems-bubble-content-deemphasized, rgba(127, 127, 127, .3));
+}
+
+.wa-vt-translation-status {
+  margin-top: 4px;
+}
+
 /* ---- dimmed row of actions at the bottom ---- */
 
 .wa-vt-foot {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
   margin-top: 4px;
   color: var(--WDS-systems-bubble-content-deemphasized, var(--secondary, rgba(127, 127, 127, .8)));
 }

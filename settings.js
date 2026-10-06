@@ -49,6 +49,7 @@ export function normalizeSettings(raw) {
   return {
     engine,
     language: typeof source.language === 'string' ? source.language : '',
+    targetLanguage: typeof source.targetLanguage === 'string' ? source.targetLanguage : 'zh',
     ttlDays: Number(source.ttlDays) || 0,
     providers,
     migrated
@@ -70,6 +71,7 @@ export async function writeSettings(settings) {
   await chrome.storage.local.set({
     engine: settings.engine,
     language: settings.language,
+    targetLanguage: settings.targetLanguage,
     ttlDays: settings.ttlDays,
     providers: settings.providers
   });
